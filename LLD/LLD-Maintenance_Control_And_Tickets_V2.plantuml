@@ -1,0 +1,87 @@
+@startuml
+autonumber
+title Maintenance Control and Tickets - Sequence Diagram (LLD)
+
+actor "User / Operator" as client
+box "Software System" #WhiteSmoke
+    participant "Web Application\n(React)" as wa
+    participant "REST API\n(Flask)" as api
+    database "MySQL Database" as db
+end box
+
+== 1. Authentication Flow ==
+client -> wa : **LOGIN** (email)
+activate wa
+wa -> api : **POST** /api/v1/auth/login\nPayload: { email }
+activate api
+api -> db : Query User by email
+activate db
+
+alt User not found
+    db --> api : Empty result
+    api --> wa : HTTP 404 Not Found
+    wa --> client : User not registered
+else Valid User
+    db --> api : User record (id, full_name, role)
+    deactivate db
+    api --> wa : HTTP 200 OK (User session data)
+    deactivate api
+    wa --> client : Redirect to Maintenance Board
+end
+deactivate wa
+
+== 2. Create Ticket Flow ==
+client -> wa : **CREATE TICKET**\n(title, asset_code, description, priority, list_id)
+activate wa
+wa -> api : **POST** /api/v1/tickets\nPayload: { title, asset_code, description, priority, list_id, created_by }
+activate api
+
+alt Invalid Input / Missing Required Fields
+    api --> wa : HTTP 400 Bad Request (Validation Error)
+    wa --> client : Show field validation errors
+else Valid Payload
+    api -> db : Execute **sp_create_ticket(...)**\n(Insert Ticket + Insert initial Ticket_History)
+    activate db
+    alt DB Connection / Execution Error
+        db --x api : SQL Exception
+        api --> wa : HTTP 500 Internal Server Error
+        wa --> client : System error, please try again
+    else Transaction Committed
+        db --> api : Created Ticket + Initial History ID
+        deactivate db
+        api --> wa : HTTP 201 Created
+        deactivate api
+        wa --> client : Display new ticket in "PENDING" list
+    end
+end
+deactivate wa
+
+== 3. Ticket Status Transition Flow ==
+client -> wa : **MOVE / TRANSITION TICKET**\n(ticket_id, target_list_id / new_status, diagnosis, comment)
+activate wa
+wa -> api : **PATCH** /api/v1/tickets/{id}/status\nPayload: { new_status, target_list_id, diagnosis, comment, changed_by }
+activate api
+
+api -> api : Validate State Machine Rules\n(e.g., PENDING -> IN_PROGRESS -> RESOLVED)
+
+alt Invalid Transition (e.g., PENDING -> RESOLVED without diagnosis) [R2.3]
+    api --> wa : HTTP 422 Unprocessable Entity\n{ error: "Invalid state transition or missing diagnosis" }
+    wa --> client : Block move & show business rule alert
+else Valid Transition [R2.2]
+    api -> db : Execute **sp_transition_ticket_status(...)**\n(START TRANSACTION: Update Ticket + Insert Ticket_History)
+    activate db
+    alt DB Transaction Failed (Rollback)
+        db --x api : SQL Error / Rollback
+        api --> wa : HTTP 500 Internal Server Error
+        wa --> client : Failed to update ticket status
+    else Transaction Committed [R2.5, R2.6]
+        db --> api : Updated Ticket & New History Record
+        deactivate db
+        api --> wa : HTTP 200 OK
+        deactivate api
+        wa --> client : Update board column & refresh audit trail
+    end
+end
+deactivate wa
+
+@enduml
