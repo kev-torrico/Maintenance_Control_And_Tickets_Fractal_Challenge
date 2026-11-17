@@ -1,14 +1,25 @@
 import logging
 from sqlalchemy import func, or_, text
 from sqlalchemy.exc import DBAPIError
-from app.modules.auth.models.user_model import User
+from app.modules.auth.models.user_model import User, UserBoard
 from app.modules.boards.models.asset_code_model import AssetCode
 from app.modules.boards.models.list_model import BoardList
 from app.modules.tickets.models.ticket_history_model import TicketHistory
 from app.modules.tickets.models.ticket_model import Ticket
 from app.modules.tickets.utils.serializers import serialize_ticket
-from app.modules.tickets.utils.state_machine import RESOLVED, has_diagnosis, validate_transition
-from app.shared.exceptions import BadRequestException, BusinessRuleException, NotFoundException
+from app.modules.tickets.utils.state_machine import (
+    RESOLVED,
+    has_diagnosis,
+    normalize_status,
+    status_label,
+    validate_transition,
+)
+from app.shared.exceptions import (
+    BadRequestException,
+    BusinessRuleException,
+    ForbiddenException,
+    NotFoundException,
+)
 from config.database import db
 from websockets.board_events import emit_ticket_moved
 
@@ -111,6 +122,9 @@ class TicketService:
                 details={"ticket_board_id": current_list.board_id, "target_board_id": target_list.board_id},
             )
 
+        # Only OPERATORs of the board may move tickets (status changes and reordering).
+        actor = TicketService._require_operator(data["changed_by_id"], target_list.board_id)
+
         # Double-defense: Python State Machine before the Stored Procedure.
         validate_transition(
             current_status=ticket.status,
@@ -126,6 +140,11 @@ class TicketService:
         from_list_id = ticket.list_id
         previous_status = ticket.status
 
+        comment = data.get("comment")
+        if not comment and normalize_status(previous_status) != target_list.status_key:
+            # Friendly default (otherwise the SP stores "Status updated to IN_PROGRESS").
+            comment = f"Status changed from {status_label(previous_status)} to {status_label(target_list.status_key)}."
+
         TicketService._call_procedure(
             SP_TRANSITION_TICKET,
             {
@@ -133,8 +152,8 @@ class TicketService:
                 "target_list_id": target_list.id,
                 "position": position,
                 "diagnosis": data.get("diagnosis"),
-                "comment": data.get("comment"),
-                "changed_by": data["changed_by"],
+                "comment": comment,
+                "changed_by": actor.full_name,
             },
         )
 
@@ -168,7 +187,7 @@ class TicketService:
         if "diagnosis" in changes and (changes["diagnosis"] or None) != (ticket.diagnosis or None):
             if ticket.status == RESOLVED and not has_diagnosis(changes["diagnosis"]):
                 raise BusinessRuleException(
-                    "The diagnosis of a RESOLVED ticket cannot be removed.",
+                    "The diagnosis of a resolved ticket cannot be removed.",
                     details={"current_status": ticket.status, "field": "diagnosis"},
                 )
             audit_comments.append(
@@ -225,6 +244,19 @@ class TicketService:
         user = db.session.get(User, user_id)
         if user is None:
             raise NotFoundException(f"User with id {user_id} not found.")
+        return user
+
+    @staticmethod
+    def _require_operator(user_id: int, board_id: int) -> User:
+        """Return the acting user if they are an OPERATOR of the board, else raise 403."""
+        user = TicketService._get_user(user_id)
+        membership = UserBoard.query.filter_by(user_id=user.id, board_id=board_id).first()
+        if membership is None or membership.role != "OPERATOR":
+            role = membership.role if membership else "NONE"
+            raise ForbiddenException(
+                "Only operators can move tickets between lists or change their status.",
+                details={"user_id": user.id, "board_id": board_id, "role": role, "required_role": "OPERATOR"},
+            )
         return user
 
     @staticmethod

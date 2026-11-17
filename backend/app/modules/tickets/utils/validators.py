@@ -39,14 +39,19 @@ def validate_create_payload(payload) -> dict:
 
 
 def validate_transition_payload(payload) -> dict:
+    """`changed_by_id` identifies the acting user (role check: only OPERATORs may move tickets).
+
+    The audit `changed_by` snapshot is taken from that user's `full_name`; a `changed_by`
+    string in the payload is accepted for backwards compatibility but not trusted.
+    """
     payload = require_json_object(payload)
-    require_fields(payload, ["target_list_id", "changed_by"])
+    require_fields(payload, ["target_list_id", "changed_by_id"])
     return {
         "target_list_id": parse_int(payload.get("target_list_id"), "target_list_id", required=True, min_value=1),
         "position": parse_int(payload.get("position"), "position", min_value=1),
         "diagnosis": clean_string(payload.get("diagnosis"), "diagnosis") or None,
         "comment": clean_string(payload.get("comment"), "comment", max_length=250) or None,
-        "changed_by": clean_string(payload.get("changed_by"), "changed_by", max_length=100, required=True),
+        "changed_by_id": parse_int(payload.get("changed_by_id"), "changed_by_id", required=True, min_value=1),
     }
 
 
