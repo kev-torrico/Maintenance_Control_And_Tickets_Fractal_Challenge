@@ -1,0 +1,65 @@
+@startuml
+autonumber
+title Maintenance Control and Tickets - LLD
+actor "User" as client
+box "Software System" #WhiteSmoke
+participant "Web Application" as wa
+participant "Server Application - API" as api
+database "DataBase" as db
+end box
+
+== User Management Layer ==
+client -> wa : **REGISTER** 
+activate wa
+wa -> api : **POST** /api/v1/user\nBody payload: full_name, email
+api -> db : Execute **sp_register_user**
+alt DataBase Timeout / Connection Failure / Malformed response
+    db --x api: Timeout / DB Connection Error
+    api --> wa: HTTP 500/502/503/504 Error
+    wa --> client: Something went wrong, please try again later.
+end
+db --> api: Result set
+api --> wa: 200 OK
+wa --> client: User registered
+
+client -> wa : **LOGGING**
+wa -> api : **POST** /api/v1/user\nBody payload: full_name, email
+api -> db : Execute **sp_logg_user**
+alt Missing user
+    db --> api: DB SP execution Error 
+    api --> wa: HTTP 401 Unauthorized / 403 Forbidden
+    wa --> client: User or email incorrect
+end
+db --> api: Result set
+api --> wa: 200 OK
+wa --> client: User logged
+
+
+== List Management Layer ==
+client -> wa : **CREATE TICKET** 
+activate wa
+wa -> api : **POST** /api/v1/ticket\nBody payload: title, description, priority, assigned_to, asset_code, diagnosis, position
+api -> db : Exacute **sp_create_task**
+alt DataBase Timeout / Connection Failure / Malformed response
+    db --x api: Timeout / DB Connection Error
+    api --> wa: HTTP 500/502/503/504 Error
+    wa --> client: Something went wrong, please try again later.
+end
+db --> api: Result set
+api --> wa: 200 OK
+wa --> client: Ticket created
+
+client -> wa : **UPDATE TICKET** 
+activate wa
+wa -> api : **UPDATE** /api/v1/ticket\nBody payload: title, description, priority, assigned_to, asset_code, diagnosis, position
+api -> db : Exacute **sp_update_task**
+alt DataBase Timeout / Connection Failure / Malformed response
+    db --x api: Timeout / DB Connection Error
+    api --> wa: HTTP 500/502/503/504 Error
+    wa --> client: Something went wrong, please try again later.
+end
+db --> api: Result set
+api --> wa: 200 OK
+wa --> client: Ticket updated
+
+@enduml
