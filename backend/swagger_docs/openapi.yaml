@@ -1,0 +1,654 @@
+openapi: 3.0.3
+info:
+  title: Maintenance Control & Tickets API
+  version: 1.0.0
+  description: |
+    REST API for the Maintenance Control and Tickets System (DTP-L2-2026).
+
+    **Ticket State Machine**
+    - `PENDING -> IN_PROGRESS` (allowed)
+    - `IN_PROGRESS -> RESOLVED` (allowed only with a non-empty `diagnosis`, from the request or already stored)
+    - `IN_PROGRESS -> PENDING` (allowed — re-queued)
+    - `SAME -> SAME` (allowed — reordering within a list)
+    - `PENDING -> RESOLVED`, `RESOLVED -> *` (forbidden, HTTP 422)
+
+    Every ticket creation, update, assignment or transition broadcasts a
+    Socket.IO `ticket_updated` event so connected boards refresh in real time.
+servers:
+  - url: /
+    description: Current host
+tags:
+  - name: Health
+  - name: Auth
+    description: Users, login and registration
+  - name: Boards
+    description: Boards, workflow lists and asset codes
+  - name: Tickets
+    description: Maintenance tickets, status transitions and audit trail
+
+paths:
+  /api/v1/health:
+    get:
+      tags: [Health]
+      summary: Service health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  service: { type: string, example: maintenance-tickets-api }
+
+  # ------------------------------------------------------------------ AUTH
+  /api/v1/auth/users:
+    get:
+      tags: [Auth]
+      summary: List all users with their board roles
+      operationId: listUsers
+      parameters:
+        - name: role
+          in: query
+          required: false
+          description: Only users holding this role on at least one board
+          schema: { $ref: "#/components/schemas/UserRole" }
+      responses:
+        "200":
+          description: Users retrieved
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      count: { type: integer, example: 3 }
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in by email
+      operationId: loginUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a user and link them to the default board (id=1)
+      operationId: registerUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RegisterRequest" }
+      responses:
+        "201":
+          description: User created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/User" }
+        "400":
+          description: Validation error or email already exists
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ---------------------------------------------------------------- BOARDS
+  /api/v1/boards:
+    get:
+      tags: [Boards]
+      summary: List all active boards
+      operationId: listBoards
+      responses:
+        "200":
+          description: Active boards
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      count: { type: integer }
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/BoardSummary" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/boards/{board_id}:
+    get:
+      tags: [Boards]
+      summary: Full board with ordered lists and nested tickets
+      operationId: getBoard
+      parameters:
+        - name: board_id
+          in: path
+          required: true
+          schema: { type: integer, example: 1 }
+      responses:
+        "200":
+          description: Board detail
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/BoardDetail" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/boards/assets:
+    get:
+      tags: [Boards]
+      summary: List registered asset codes
+      operationId: listAssetCodes
+      parameters:
+        - name: search
+          in: query
+          required: false
+          description: Case-insensitive partial match on the asset code name
+          schema: { type: string, example: ATM }
+      responses:
+        "200":
+          description: Asset codes
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      count: { type: integer }
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/AssetCode" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # --------------------------------------------------------------- TICKETS
+  /api/v1/tickets:
+    get:
+      tags: [Tickets]
+      summary: List tickets with optional filters
+      operationId: listTickets
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/TicketStatus" }
+        - name: priority
+          in: query
+          schema: { $ref: "#/components/schemas/TicketPriority" }
+        - name: asset_code
+          in: query
+          description: Exact asset code name (case-insensitive)
+          schema: { type: string, example: ATM-0451 }
+        - name: assigned_to
+          in: query
+          description: Assigned user id
+          schema: { type: integer, example: 1 }
+        - name: search
+          in: query
+          description: Keyword matched against title, description, diagnosis and asset code
+          schema: { type: string, example: UPS }
+      responses:
+        "200":
+          description: Tickets (newest first)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      count: { type: integer }
+                      filters: { type: object, additionalProperties: true }
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Ticket" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      tags: [Tickets]
+      summary: Create a ticket (executes sp_create_ticket)
+      operationId: createTicket
+      description: |
+        Creates the ticket atomically through `sp_create_ticket`, which also finds
+        or creates the asset code (normalized to uppercase), places the ticket at
+        the bottom of the target list and writes the initial `ticket_history` row.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateTicketRequest" }
+      responses:
+        "201":
+          description: Ticket created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/TicketDetail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/BusinessRule" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/tickets/{ticket_id}:
+    parameters:
+      - $ref: "#/components/parameters/TicketId"
+    get:
+      tags: [Tickets]
+      summary: Ticket detail with chronological history
+      operationId: getTicket
+      responses:
+        "200":
+          description: Ticket detail
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/TicketDetail" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      tags: [Tickets]
+      summary: Update ticket metadata (non-status fields)
+      operationId: updateTicket
+      description: |
+        Updates `title`, `description`, `priority`, `assigned_to` and/or `diagnosis`.
+        Changing `assigned_to` or `diagnosis` writes an audit row to `ticket_history`
+        and therefore requires `changed_by`. `status`, `list_id` and `position` are
+        rejected here — use `PATCH /api/v1/tickets/{ticket_id}/status`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateTicketRequest" }
+      responses:
+        "200":
+          description: Ticket updated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/TicketDetail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/BusinessRule" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/tickets/{ticket_id}/status:
+    parameters:
+      - $ref: "#/components/parameters/TicketId"
+    patch:
+      tags: [Tickets]
+      summary: Transition ticket status / move between lists (executes sp_transition_ticket_status)
+      operationId: transitionTicketStatus
+      description: |
+        The target status is derived from the destination list title. The State
+        Machine is validated in Python first and again inside the Stored Procedure.
+        If `position` is omitted when moving to another list, the ticket is placed
+        at the bottom of the destination list.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TransitionTicketRequest" }
+            examples:
+              startWork:
+                summary: PENDING -> IN_PROGRESS
+                value: { target_list_id: 2, comment: "Technician on site.", changed_by: "Juan Perez" }
+              resolve:
+                summary: IN_PROGRESS -> RESOLVED
+                value:
+                  target_list_id: 3
+                  diagnosis: "Faulty UPS battery bank replaced."
+                  comment: "Load tests passed."
+                  changed_by: "Juan Perez"
+      responses:
+        "200":
+          description: Ticket transitioned
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/TransitionResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/BusinessRule" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/tickets/{ticket_id}/history:
+    parameters:
+      - $ref: "#/components/parameters/TicketId"
+    get:
+      tags: [Tickets]
+      summary: Chronological audit trail of a ticket
+      operationId: getTicketHistory
+      responses:
+        "200":
+          description: History entries (oldest first)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      count: { type: integer }
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/TicketHistory" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+components:
+  parameters:
+    TicketId:
+      name: ticket_id
+      in: path
+      required: true
+      schema: { type: integer, example: 1 }
+
+  responses:
+    BadRequest:
+      description: Missing required fields, invalid JSON or malformed parameters
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            success: false
+            error: Bad Request
+            message: "Missing required field(s): title, asset_code."
+            details: { missing_fields: [title, asset_code] }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            success: false
+            error: Not Found
+            message: Ticket with id 999 not found.
+    BusinessRule:
+      description: Business rule or State Machine violation
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            success: false
+            error: Unprocessable Entity
+            message: "Invalid status transition PENDING -> RESOLVED. A ticket must be IN_PROGRESS before it can be RESOLVED."
+            details:
+              current_status: PENDING
+              target_status: RESOLVED
+              allowed_targets: [IN_PROGRESS]
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            success: false
+            error: Internal Server Error
+            message: An unexpected error occurred while processing the request.
+
+  schemas:
+    UserRole:
+      type: string
+      enum: [REPORTER, OPERATOR]
+    TicketStatus:
+      type: string
+      enum: [PENDING, IN_PROGRESS, RESOLVED]
+    TicketPriority:
+      type: string
+      enum: [LOW, MEDIUM, HIGH]
+
+    SuccessEnvelope:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        message: { type: string, example: OK }
+        data: {}
+    Error:
+      type: object
+      properties:
+        success: { type: boolean, example: false }
+        error: { type: string, example: Unprocessable Entity }
+        message: { type: string }
+        details:
+          type: object
+          additionalProperties: true
+          nullable: true
+
+    User:
+      type: object
+      properties:
+        id: { type: integer, example: 1 }
+        full_name: { type: string, example: Juan Perez }
+        email: { type: string, format: email, example: juan.perez@fractal.com }
+        role:
+          allOf: [{ $ref: "#/components/schemas/UserRole" }]
+          nullable: true
+          description: Role on the default board (id=1), or the first board membership
+        boards:
+          type: array
+          items:
+            type: object
+            properties:
+              board_id: { type: integer, example: 1 }
+              role: { $ref: "#/components/schemas/UserRole" }
+        created_at: { type: string, format: date-time }
+    LoginRequest:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email, example: juan.perez@fractal.com }
+    RegisterRequest:
+      type: object
+      required: [full_name, email, role]
+      properties:
+        full_name: { type: string, maxLength: 100, example: Ana Torres }
+        email: { type: string, format: email, maxLength: 100, example: ana.torres@fractal.com }
+        role: { $ref: "#/components/schemas/UserRole" }
+
+    AssetCode:
+      type: object
+      properties:
+        id: { type: integer, example: 1 }
+        name: { type: string, example: ATM-0451 }
+    AssignedUser:
+      type: object
+      nullable: true
+      properties:
+        id: { type: integer, example: 1 }
+        full_name: { type: string, example: Juan Perez }
+    ListSummary:
+      type: object
+      properties:
+        id: { type: integer, example: 1 }
+        title: { type: string, example: PENDING }
+        board_id: { type: integer, example: 1 }
+        position: { type: integer, example: 1 }
+    BoardSummary:
+      type: object
+      properties:
+        id: { type: integer, example: 1 }
+        title: { type: string, example: Maintenance & Infrastructure Control }
+        status: { type: string, enum: [ACTIVE, INACTIVE] }
+        created_at: { type: string, format: date-time }
+    BoardList:
+      allOf:
+        - $ref: "#/components/schemas/ListSummary"
+        - type: object
+          properties:
+            created_at: { type: string, format: date-time }
+            ticket_count: { type: integer, example: 2 }
+            tickets:
+              type: array
+              description: Ordered by position ASC
+              items: { $ref: "#/components/schemas/BoardTicket" }
+    BoardDetail:
+      allOf:
+        - $ref: "#/components/schemas/BoardSummary"
+        - type: object
+          properties:
+            lists:
+              type: array
+              description: Ordered by position ASC
+              items: { $ref: "#/components/schemas/BoardList" }
+
+    BoardTicket:
+      type: object
+      properties:
+        id: { type: integer, example: 3 }
+        title: { type: string, example: UPS alarm }
+        description: { type: string, example: Backup battery emitting an intermittent alert. }
+        position: { type: integer, example: 1 }
+        priority: { $ref: "#/components/schemas/TicketPriority" }
+        status: { $ref: "#/components/schemas/TicketStatus" }
+        diagnosis: { type: string, nullable: true }
+        assigned_to: { type: integer, nullable: true, example: 2 }
+        assigned_user: { $ref: "#/components/schemas/AssignedUser" }
+        asset_code_id: { type: integer, example: 3 }
+        asset_code: { $ref: "#/components/schemas/AssetCode" }
+        list_id: { type: integer, example: 2 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Ticket:
+      allOf:
+        - $ref: "#/components/schemas/BoardTicket"
+        - type: object
+          properties:
+            list: { $ref: "#/components/schemas/ListSummary" }
+    TicketDetail:
+      allOf:
+        - $ref: "#/components/schemas/Ticket"
+        - type: object
+          properties:
+            history:
+              type: array
+              description: Ordered by created_at ASC, id ASC
+              items: { $ref: "#/components/schemas/TicketHistory" }
+    TransitionResult:
+      allOf:
+        - $ref: "#/components/schemas/Ticket"
+        - type: object
+          properties:
+            latest_history:
+              allOf: [{ $ref: "#/components/schemas/TicketHistory" }]
+              nullable: true
+    TicketHistory:
+      type: object
+      properties:
+        id: { type: integer, example: 10 }
+        ticket_id: { type: integer, example: 3 }
+        previous_status:
+          allOf: [{ $ref: "#/components/schemas/TicketStatus" }]
+          nullable: true
+        new_status: { $ref: "#/components/schemas/TicketStatus" }
+        comment: { type: string, example: Checking the UPS battery bank. }
+        changed_by: { type: string, example: Juan Perez }
+        created_at: { type: string, format: date-time }
+
+    CreateTicketRequest:
+      type: object
+      required: [title, description, asset_code, created_by]
+      properties:
+        title: { type: string, maxLength: 100, example: ATM out of service }
+        description: { type: string, maxLength: 250, example: Screen unresponsive when starting a transaction. }
+        priority:
+          allOf: [{ $ref: "#/components/schemas/TicketPriority" }]
+          default: MEDIUM
+        asset_code:
+          type: string
+          maxLength: 100
+          example: ATM-0451
+          description: Found or created (normalized to uppercase)
+        list_id:
+          type: integer
+          default: 1
+          description: Target list (defaults to the PENDING list, id=1)
+        assigned_to: { type: integer, nullable: true, example: 1 }
+        created_by: { type: string, maxLength: 100, example: Maria Lopez }
+    TransitionTicketRequest:
+      type: object
+      required: [target_list_id, changed_by]
+      properties:
+        target_list_id: { type: integer, example: 2 }
+        position:
+          type: integer
+          minimum: 1
+          description: New position in the target list. Defaults to the bottom when the list changes.
+        diagnosis:
+          type: string
+          nullable: true
+          description: Required to reach RESOLVED unless the ticket already has one
+        comment: { type: string, maxLength: 250, nullable: true }
+        changed_by: { type: string, maxLength: 100, example: Juan Perez }
+    UpdateTicketRequest:
+      type: object
+      minProperties: 1
+      properties:
+        title: { type: string, maxLength: 100 }
+        description: { type: string, maxLength: 250 }
+        priority: { $ref: "#/components/schemas/TicketPriority" }
+        assigned_to:
+          type: integer
+          nullable: true
+          description: null unassigns the ticket
+        diagnosis: { type: string, nullable: true }
+        changed_by:
+          type: string
+          maxLength: 100
+          description: Required when assigned_to or diagnosis changes (audit trail)
+      example:
+        assigned_to: 2
+        changed_by: Maria Lopez
