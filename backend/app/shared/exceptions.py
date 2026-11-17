@@ -15,6 +15,12 @@ class BadRequestException(AppException):
     status_code = 400
     error = "Bad Request"
 
+class ForbiddenException(AppException):
+    """The acting user lacks the role required for the operation (HTTP 403)."""
+
+    status_code = 403
+    error = "Forbidden"
+
 class NotFoundException(AppException):
     """Requested resource does not exist (HTTP 404)."""
 

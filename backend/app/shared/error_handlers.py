@@ -3,6 +3,7 @@ from app.shared.exceptions import (
     AppException,
     BadRequestException,
     BusinessRuleException,
+    ForbiddenException,
     NotFoundException,
 )
 from app.shared.responses import error_response
@@ -14,6 +15,11 @@ def register_error_handlers(app):
     @app.errorhandler(BusinessRuleException)
     def handle_business_rule_exception(error):
         """State Machine / business rule violations -> HTTP 422."""
+        return _handle_app_exception(error)
+
+    @app.errorhandler(ForbiddenException)
+    def handle_forbidden_exception(error):
+        """Role/permission violations (e.g. a REPORTER moving tickets) -> HTTP 403."""
         return _handle_app_exception(error)
 
     @app.errorhandler(NotFoundException)
