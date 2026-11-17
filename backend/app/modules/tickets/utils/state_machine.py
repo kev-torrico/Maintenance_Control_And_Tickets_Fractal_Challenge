@@ -9,9 +9,18 @@ ALLOWED_TRANSITIONS = {
     IN_PROGRESS: {RESOLVED, PENDING},
     RESOLVED: set(),
 }
+STATUS_LABELS = {
+    PENDING: "Pending",
+    IN_PROGRESS: "In progress",
+    RESOLVED: "Resolved",
+}
 
 def normalize_status(status) -> str:
     return (status or "").strip().upper()
+
+def status_label(status) -> str:
+    code = normalize_status(status)
+    return STATUS_LABELS.get(code, code.replace("_", " ").capitalize())
 
 def has_diagnosis(value) -> bool:
     return isinstance(value, str) and bool(value.strip())
@@ -40,11 +49,11 @@ def validate_transition(current_status, target_status, request_diagnosis=None, c
         if current == RESOLVED:
             reason = "Resolved tickets are closed and cannot be reopened directly."
         elif current == PENDING and target == RESOLVED:
-            reason = "A ticket must be IN_PROGRESS before it can be RESOLVED."
+            reason = "A ticket must be In progress before it can be Resolved."
         else:
             reason = "Transition is not allowed by the workflow rules."
         raise BusinessRuleException(
-            f"Invalid status transition {current} -> {target}. {reason}",
+            f"Invalid status transition from {status_label(current)} to {status_label(target)}. {reason}",
             details={
                 "current_status": current,
                 "target_status": target,
@@ -54,7 +63,7 @@ def validate_transition(current_status, target_status, request_diagnosis=None, c
 
     if target == RESOLVED and not (has_diagnosis(request_diagnosis) or has_diagnosis(current_diagnosis)):
         raise BusinessRuleException(
-            "A technical diagnosis is required before marking a ticket as RESOLVED.",
+            "A technical diagnosis is required before marking a ticket as Resolved.",
             details={"current_status": current, "target_status": target, "field": "diagnosis"},
         )
 
