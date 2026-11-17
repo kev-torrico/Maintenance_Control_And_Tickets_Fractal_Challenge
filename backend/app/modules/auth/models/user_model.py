@@ -1,8 +1,6 @@
 from config.database import db
 
 USER_ROLES = ("REPORTER", "OPERATOR")
-
-
 class User(db.Model):
     __tablename__ = "app_user"
 
@@ -21,7 +19,6 @@ class User(db.Model):
 
     def __repr__(self):
         return f"<User {self.id} {self.email}>"
-
 
 class UserBoard(db.Model):
     __tablename__ = "user_board"

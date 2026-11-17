@@ -1,5 +1,4 @@
 from flask import request
-
 from app.modules.auth.services.auth_service import AuthService
 from app.modules.auth.utils.validators import (
     serialize_user,
@@ -9,7 +8,6 @@ from app.modules.auth.utils.validators import (
 )
 from app.shared.responses import success_response
 from app.shared.validators import get_json_body
-
 
 class AuthController:
     @staticmethod

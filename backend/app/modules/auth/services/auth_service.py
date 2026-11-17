@@ -1,14 +1,11 @@
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
-
 from app.modules.auth.models.user_model import User, UserBoard
 from app.modules.boards.models.board_model import Board
 from app.shared.exceptions import BadRequestException, NotFoundException
 from config.database import db
 
 DEFAULT_BOARD_ID = 1
-
-
 class AuthService:
     @staticmethod
     def list_users(role: str = None):
