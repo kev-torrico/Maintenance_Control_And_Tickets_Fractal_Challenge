@@ -1,4 +1,12 @@
-# Virtual Environment
+# Node / Frontend (any depth)
+node_modules/
+dist/
+dist-ssr/
+*.local
+.next/
+*.tsbuildinfo
+
+# Python Virtual Environment
 venv/
 .venv/
 ENV/
